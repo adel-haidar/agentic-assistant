@@ -1,0 +1,15 @@
+[project]
+name = "agentic-assitant"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "boto3>=1.43.14",
+    "botocore[crt]>=1.43.14",
+    "fastapi[standard]>=0.136.3",
+    "httpx>=0.28.1",
+    "pydantic[email,timezone]>=2.13.4",
+    "pydantic-settings>=2.0.0",
+    "mcp>=1.0.0",
+]
