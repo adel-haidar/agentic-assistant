@@ -2,7 +2,7 @@ import asyncio
 import logging
 
 from mcp import ClientSession
-from mcp.client.sse import sse_client
+from mcp.client.streamable_http import streamable_http_client
 
 logger = logging.getLogger(__name__)
 
@@ -15,23 +15,23 @@ class MemoryClient:
     reply to an email, we search the memory server using the sender and subject
     as the query so the LLM has personal context about who is writing and why.
 
-    Connects over SSE (Server-Sent Events), which is a persistent HTTP stream
-    used by the MCP protocol — think of it as a live channel to the server.
+    Connects over the MCP streamable-HTTP transport, which uses a single HTTP
+    endpoint (typically /mcp) for all JSON-RPC messages.
     """
 
     def __init__(self, server_url: str):
-        """Configure the client with the SSE endpoint of the memory server.
+        """Configure the client with the streamable-HTTP endpoint of the memory server.
 
         Args:
-            server_url: The full SSE URL of the MCP memory server,
-                e.g. 'http://ec2-ip:3000/sse'.
+            server_url: The full URL of the MCP memory server endpoint,
+                e.g. 'http://ec2-ip:8000/mcp'.
         """
         self._server_url = server_url
-        if not server_url.endswith("/sse"):
+        if not server_url.endswith("/mcp"):
             logger.warning(
-                "MCP_MEMORY_URL %r does not end with '/sse' — "
+                "MCP_MEMORY_URL %r does not end with '/mcp' — "
                 "memory searches will likely fail with 404. "
-                "Set MCP_MEMORY_URL to the full SSE endpoint, e.g. 'http://host:3000/sse'.",
+                "Set MCP_MEMORY_URL to the streamable-HTTP endpoint, e.g. 'http://host:8000/mcp'.",
                 server_url,
             )
 
@@ -63,10 +63,10 @@ class MemoryClient:
 
     async def _search(self, query: str) -> str:
         """Internal async implementation that performs the actual MCP call."""
-        async with sse_client(url=self._server_url) as (read, write):
+        async with streamable_http_client(url=self._server_url) as (read, write, _):
             async with ClientSession(read, write) as session:
                 await session.initialize()
-                result = await session.call_tool("search_nodes", {"query": query})
+                result = await session.call_tool("search", {"query": query})
                 if result.isError or not result.content:
                     return ""
                 return "\n".join(

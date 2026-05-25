@@ -82,6 +82,7 @@ class MicrosoftTokenStore:
                 "redirect_uri": s.ms_redirect_uri,
                 "grant_type": "authorization_code",
             },
+            timeout=30.0,
         )
         response.raise_for_status()
         self._refresh_token = response.json()["refresh_token"]
@@ -107,6 +108,7 @@ class MicrosoftTokenStore:
                 "grant_type": "refresh_token",
                 "scope": "openid profile offline_access Mail.ReadWrite Files.Read",
             },
+            timeout=30.0,
         )
         response.raise_for_status()
         token_data = response.json()

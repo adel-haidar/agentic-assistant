@@ -53,6 +53,10 @@ class GraphClient:
         the API returns only what changed since then — this avoids re-processing
         the entire inbox every time.
 
+        The API may paginate results across multiple pages linked by
+        @odata.nextLink. Only the final page carries @odata.deltaLink, so we
+        must follow all next-links before returning.
+
         Args:
             folder: The name of the Outlook folder to check, e.g. 'inbox' or
                 'junkemail'.
@@ -64,13 +68,35 @@ class GraphClient:
             - A list of raw email dicts as returned by the Graph API.
             - The new delta link to store and pass on the next sync call.
         """
-        url = delta_link or f"{_GRAPH_BASE}/me/mailFolders/{folder}/messages/delta"
-        response = httpx.get(
-            url, headers=self._headers(), params={"$select": _DELTA_SELECT}
-        )
-        response.raise_for_status()
-        data = response.json()
-        return data.get("value", []), data.get("@odata.deltaLink")
+        # On the first call use the base delta URL with $select; on subsequent
+        # calls the stored delta_link already encodes all parameters so we must
+        # not append $select again (it is unsupported on delta link URLs).
+        if delta_link:
+            url = delta_link
+            params: dict | None = None
+        else:
+            url = f"{_GRAPH_BASE}/me/mailFolders/{folder}/messages/delta"
+            params = {"$select": _DELTA_SELECT}
+
+        all_messages: list[dict] = []
+        new_delta_link: str | None = None
+
+        while url:
+            response = httpx.get(url, headers=self._headers(), params=params, timeout=30.0)
+            response.raise_for_status()
+            data = response.json()
+
+            all_messages.extend(data.get("value", []))
+
+            if "@odata.deltaLink" in data:
+                new_delta_link = data["@odata.deltaLink"]
+                break
+
+            # Follow the next page; delta link params must not be re-sent.
+            url = data.get("@odata.nextLink")
+            params = None
+
+        return all_messages, new_delta_link
 
     def save_draft(self, draft: EmailDraft, recipient: str) -> None:
         """Save a draft reply to the user's Outlook Drafts folder.
@@ -90,5 +116,6 @@ class GraphClient:
                 "body": {"contentType": "text", "content": draft.draft_body},
                 "toRecipients": [{"emailAddress": {"address": recipient}}],
             },
+            timeout=30.0,
         )
         response.raise_for_status()
