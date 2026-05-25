@@ -75,7 +75,7 @@ class EmailResponseWriter(BaseLLMService):
                   }}
                   - Return raw JSON only, no markdown, no extra text.
           """
-        text = self._invoke(prompt)
+        text = self._strip_markdown(self._invoke(prompt))
         data = json.loads(text)
         subject = (
             email.subject

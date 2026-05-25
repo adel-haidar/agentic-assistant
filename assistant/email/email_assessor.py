@@ -59,7 +59,7 @@ class EmailAssessor(BaseLLMService):
                   - category must be one of: personal, work, marketing, security, notification, unknown.
                   - Return raw JSON only, no markdown, no extra text.
           """
-        text = self._invoke(prompt)
+        text = self._strip_markdown(self._invoke(prompt))
         data = json.loads(text)
         return EmailAssessment(
             needs_response=data["needs_response"],

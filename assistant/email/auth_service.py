@@ -6,7 +6,7 @@ import httpx
 from assistant.shared.settings import Settings, get_settings
 
 _MS_AUTH_BASE = "https://login.microsoftonline.com"
-_MS_SCOPES = "openid profile offline_access https://graph.microsoft.com/Mail.ReadWrite"
+_MS_SCOPES = "openid profile offline_access https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Files.Read"
 
 
 class MicrosoftTokenStore:
@@ -105,7 +105,7 @@ class MicrosoftTokenStore:
                 "client_secret": s.ms_client_secret,
                 "refresh_token": self._refresh_token,
                 "grant_type": "refresh_token",
-                "scope": "openid profile offline_access Mail.ReadWrite",
+                "scope": "openid profile offline_access Mail.ReadWrite Files.Read",
             },
         )
         response.raise_for_status()
