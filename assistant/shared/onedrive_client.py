@@ -1,4 +1,5 @@
 import logging
+import re
 from urllib.parse import quote
 
 import httpx
@@ -9,6 +10,16 @@ logger = logging.getLogger(__name__)
 
 _GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 _MAX_RESULTS = 5
+
+
+def _sanitize_query(query: str) -> str:
+    """Strip characters that break OData string literal parsing in the Graph API path.
+
+    The search(q='...') OData function in the URL path cannot handle colons,
+    pipes, angle brackets, and similar punctuation — they cause 400 errors.
+    """
+    cleaned = re.sub(r"[^\w\s\-\.]", " ", query)
+    return " ".join(cleaned.split())[:100]
 
 
 class OneDriveFile:
@@ -64,7 +75,7 @@ class OneDriveClient:
         """
         try:
             # The OData function syntax requires the query to be part of the URL path.
-            url = f"{_GRAPH_BASE}/me/drive/root/search(q='{quote(query)}')"
+            url = f"{_GRAPH_BASE}/me/drive/root/search(q='{quote(_sanitize_query(query))}')"
             response = httpx.get(
                 url,
                 headers=self._headers(),

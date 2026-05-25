@@ -27,6 +27,13 @@ class MemoryClient:
                 e.g. 'http://ec2-ip:3000/sse'.
         """
         self._server_url = server_url
+        if not server_url.endswith("/sse"):
+            logger.warning(
+                "MCP_MEMORY_URL %r does not end with '/sse' — "
+                "memory searches will likely fail with 404. "
+                "Set MCP_MEMORY_URL to the full SSE endpoint, e.g. 'http://host:3000/sse'.",
+                server_url,
+            )
 
     def search(self, query: str) -> str:
         """Search the memory server and return relevant context as plain text.
