@@ -1,13 +1,17 @@
 import asyncio
 import logging
+import ast
 
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
+from assistant.email.model import EmailMessage
+from assistant.shared.base_llm_service import BaseLLMService
+
 logger = logging.getLogger(__name__)
 
 
-class MemoryClient:
+class MemoryClient(BaseLLMService):
     """Queries the MCP memory server for context relevant to a given topic.
 
     The memory server stores knowledge about the user gathered from past AI
@@ -19,13 +23,14 @@ class MemoryClient:
     endpoint (typically /mcp) for all JSON-RPC messages.
     """
 
-    def __init__(self, server_url: str):
+    def __init__(self, bedrock_client, model_id: str, server_url: str):
         """Configure the client with the streamable-HTTP endpoint of the memory server.
 
         Args:
             server_url: The full URL of the MCP memory server endpoint,
                 e.g. 'http://ec2-ip:8000/mcp'.
         """
+        super().__init__(bedrock_client=bedrock_client, model_id=model_id)
         self._server_url = server_url
         if not server_url.endswith("/mcp"):
             logger.warning(
@@ -35,30 +40,56 @@ class MemoryClient:
                 server_url,
             )
 
-    def search(self, query: str) -> str:
-        """Search the memory server and return relevant context as plain text.
+    def search(self, email: EmailMessage) -> str:
+        """Search the MCP memory server for context relevant to an email.
 
-        Opens a connection, calls the `search_nodes` tool on the MCP server,
-        and joins all returned text fragments into a single string. If the
-        server is unreachable or returns nothing, an empty string is returned
-        so the rest of the pipeline is not interrupted.
-
-        The MCP SDK is async-only, so we use `asyncio.run()` to run it from
-        this synchronous method. This is safe here because FastAPI runs sync
-        route handlers in a thread pool that has no active event loop.
+        Asks the LLM to derive a list of search queries from the email, then
+        runs each query against the memory server. Results are concatenated into
+        a single plain-text block suitable for inclusion in an LLM prompt.
 
         Args:
-            query: A natural-language search string, typically the sender's
-                email address combined with the email subject.
+            email: The incoming email whose sender, subject, and body preview are
+                used to generate search queries.
 
         Returns:
-            A plain-text block of relevant memories, or an empty string if
-            nothing was found or the server could not be reached.
+            A multi-line string of memory results, or an empty string if the
+            memory server is unreachable or the search fails.
         """
+        prompt = f"""
+              You are an email assistant. You read an email and return an array of keywords.
+              These keywords will be used to search an mcp-memory server for all information that could enrich the context be helpful to better respond to this email 
+              please analyse the given email and create the most effective search query that can yield the best results.
+
+              Sender: {email.sender}
+              Subject: {email.subject}
+              Body:
+              {email.body_preview}
+              Rules:
+                - Some APIs are very error prone to some symbol, try to keep your query simple and don't include symbols that may cause errors.
+                - Memories are not always exact match of the words mentioned in the email. Examples:
+                  If you find the word: Resume, the memory server might have a memory called job application, job, changing jobs etc.
+                                        Certificate: Zeugnisse, Zertificate, Abschlusse, exam, etc.
+                                        Dokumente: Documents, Unterlagen, Dateien, Files, folder, case etc.
+                                        Bewerbung: Application, Jobbewerbung, Jobapplication, job application etc.
+              Result:
+                - The result MUST ONLY be a python array containing all recommended quries. No explination, no reasoning, no other string.
+                - If the result contains anything other than pure array in python syntax, the program will fail.
+
+          """
         try:
-            return asyncio.run(self._search(query))
+            raw = self._strip_markdown(self._invoke(prompt))
+            queries = ast.literal_eval(raw)
+            logger.debug(
+                "Memory search: %d queries for email from %r", len(queries), email.sender
+            )
+            result = "Context that might be relevant"
+            for query in queries:
+                result = result + "\n" + asyncio.run(self._search(query))
+            return result
         except Exception:
-            logger.warning("Memory search failed for query %r", query, exc_info=True)
+            logger.warning(
+                "Memory search failed for query %r", email.subject, exc_info=True
+            )
             return ""
 
     async def _search(self, query: str) -> str:

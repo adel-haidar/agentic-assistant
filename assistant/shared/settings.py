@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     if they are missing.
     """
 
+    model_config = {"env_file": ".env"}
+
     ms_client_id: str
     """The client ID of your Microsoft Entra (Azure AD) app registration."""
 

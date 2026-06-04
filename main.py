@@ -3,6 +3,7 @@ from functools import lru_cache
 from typing import Annotated
 
 import boto3
+from botocore import model
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
 
@@ -44,40 +45,6 @@ def _get_bedrock_client(region: str):
         A boto3 `bedrock-runtime` client.
     """
     return boto3.client("bedrock-runtime", region_name=region)
-
-
-def _build_context(
-    email: EmailMessage,
-    memory_client: MemoryClient | None,
-    onedrive_client: OneDriveClient,
-) -> tuple[str, list[str]]:
-    """Fetch personal memories and relevant OneDrive documents for an email.
-
-    This is called before assessing every email so both the assessor and the
-    response writer have the same context available.
-
-    Queries are built from the sender address and email subject. Both lookups
-    are best-effort — if either fails, the pipeline continues with whatever
-    partial context is available.
-
-    Args:
-        email: The email we are building context for.
-        memory_client: A connected `MemoryClient`, or None if the MCP memory
-            server URL is not configured in settings.
-        onedrive_client: A connected `OneDriveClient` for document search.
-
-    Returns:
-        A tuple of:
-        - memories: A plain-text string of relevant memory content (may be empty).
-        - doc_names: A list of OneDrive file name strings (may be empty).
-    """
-    search_query = f"{email.sender} {email.subject}"
-
-    memories = memory_client.search(search_query) if memory_client else ""
-    docs = onedrive_client.search(email.subject)
-    doc_names = [str(doc) for doc in docs]
-
-    return memories, doc_names
 
 
 @app.get("/")
@@ -146,22 +113,33 @@ def sync_email(token_store: TokenStoreDep, settings: SettingsDep):
         raise HTTPException(status_code=401, detail="Microsoft account not connected")
 
     bedrock_client = _get_bedrock_client(settings.aws_region)
-    email_assessor = EmailAssessor(bedrock_client=bedrock_client, model_id=settings.bedrock_model_id)
-    response_writer = EmailResponseWriter(bedrock_client=bedrock_client, model_id=settings.bedrock_model_id)
+    email_assessor = EmailAssessor(
+        bedrock_client=bedrock_client, model_id=settings.bedrock_model_id
+    )
+    response_writer = EmailResponseWriter(
+        bedrock_client=bedrock_client, model_id=settings.bedrock_model_id
+    )
     graph_client = GraphClient(token_store=token_store)
-    onedrive_client = OneDriveClient(token_store=token_store)
+    onedrive_client = OneDriveClient(
+        bedrock_client=bedrock_client,
+        model_id=settings.bedrock_model_id,
+        token_store=token_store,
+    )
     memory_client = (
-        MemoryClient(server_url=settings.mcp_memory_url)
+        MemoryClient(
+            bedrock_client=bedrock_client,
+            model_id=settings.bedrock_model_id,
+            server_url=settings.mcp_memory_url,
+        )
         if settings.mcp_memory_url
         else None
     )
 
     all_messages = []
     for folder in delta_links:
-        messages, delta_link = graph_client.fetch_delta(folder, delta_links[folder])
+        messages, delta_link = graph_client.fetch_delta(folder, delta_links[folder], 5)
         all_messages.extend(messages)
         delta_links[folder] = delta_link
-
     result = EmailSyncResult(
         checked_messages=len(all_messages), needs_response=0, drafts_created=0
     )
@@ -174,15 +152,16 @@ def sync_email(token_store: TokenStoreDep, settings: SettingsDep):
             body_preview=message.get("bodyPreview") or "",
         )
 
-        memories, doc_names = _build_context(email, memory_client, onedrive_client)
+        memories = memory_client.search(email)
 
         assessment = email_assessor.assess_email(email, context=memories)
         if assessment.needs_response:
             result.needs_response += 1
+            docs = onedrive_client.search(email)
             draft = response_writer.write_response_draft(
-                email, context=memories, relevant_docs=doc_names
+                email, context=memories, relevant_docs=docs
             )
-            graph_client.save_draft(draft=draft, recipient=email.sender)
+            graph_client.save_draft(draft=draft, recipient=email.sender, files=docs)
             result.drafts_created += 1
             logger.info("Draft saved for %s", email.sender)
 

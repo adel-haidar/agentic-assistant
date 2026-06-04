@@ -1,3 +1,8 @@
+import logging
+
+logger = logging.getLogger(__name__)
+
+
 class BaseLLMService:
     """Base class for any service that needs to talk to an LLM via Amazon Bedrock.
 
@@ -30,6 +35,7 @@ class BaseLLMService:
         Returns:
             The model's response as a plain string.
         """
+        logger.debug("Invoking Bedrock model %s", self._model_id)
         response = self._client.converse(
             modelId=self._model_id,
             messages=[
@@ -56,8 +62,9 @@ class BaseLLMService:
         Returns:
             The string with any leading/trailing code fences removed.
         """
-        if text.startswith("```json"):
-            text = text.removeprefix("```json").removesuffix("```").strip()
-        elif text.startswith("```"):
-            text = text.removeprefix("```").removesuffix("```").strip()
+        if text.startswith("```"):
+            # Remove first line (```json, ```python, ```anything)
+            text = text.split("\n", 1)[-1]
+            # Remove trailing ```
+            text = text.removesuffix("```").strip()
         return text

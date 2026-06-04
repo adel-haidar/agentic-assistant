@@ -1,7 +1,10 @@
 import json
+import logging
 
 from assistant.email.model import EmailAssessment, EmailMessage
 from assistant.shared.base_llm_service import BaseLLMService
+
+logger = logging.getLogger(__name__)
 
 
 class EmailAssessor(BaseLLMService):
@@ -61,8 +64,15 @@ class EmailAssessor(BaseLLMService):
           """
         text = self._strip_markdown(self._invoke(prompt))
         data = json.loads(text)
-        return EmailAssessment(
+        assessment = EmailAssessment(
             needs_response=data["needs_response"],
             category=data["category"],
             reason=data["reason"],
         )
+        logger.info(
+            "Assessed email from %r: category=%s needs_response=%s",
+            email.sender,
+            assessment.category,
+            assessment.needs_response,
+        )
+        return assessment

@@ -43,7 +43,10 @@ class GraphClient:
         return {"Authorization": f"Bearer {self._token_store.get_access_token()}"}
 
     def fetch_delta(
-        self, folder: str, delta_link: str | None
+        self,
+        folder: str,
+        delta_link: str | None,
+        max_messages: int | None = None,
     ) -> tuple[list[dict], str | None]:
         """Fetch only the emails that have arrived since the last sync.
 
@@ -62,6 +65,8 @@ class GraphClient:
                 'junkemail'.
             delta_link: The bookmark URL returned by the previous sync. Pass
                 `None` on the first ever call.
+            max_messages: If set, stop collecting results after this many messages.
+                Useful for rate-limiting how much is processed per sync.
 
         Returns:
             A tuple of:
@@ -77,16 +82,24 @@ class GraphClient:
         else:
             url = f"{_GRAPH_BASE}/me/mailFolders/{folder}/messages/delta"
             params = {"$select": _DELTA_SELECT}
+            if max_messages:
+                params["$top"] = str(max_messages)
 
         all_messages: list[dict] = []
         new_delta_link: str | None = None
 
         while url:
-            response = httpx.get(url, headers=self._headers(), params=params, timeout=30.0)
+            response = httpx.get(
+                url, headers=self._headers(), params=params, timeout=30.0
+            )
             response.raise_for_status()
             data = response.json()
 
             all_messages.extend(data.get("value", []))
+
+            if max_messages and len(all_messages) >= max_messages:
+                all_messages = all_messages[:max_messages]
+                break
 
             if "@odata.deltaLink" in data:
                 new_delta_link = data["@odata.deltaLink"]
@@ -96,17 +109,26 @@ class GraphClient:
             url = data.get("@odata.nextLink")
             params = None
 
+        logger.debug("Fetched %d messages from folder %r", len(all_messages), folder)
         return all_messages, new_delta_link
 
-    def save_draft(self, draft: EmailDraft, recipient: str) -> None:
-        """Save a draft reply to the user's Outlook Drafts folder.
+    def save_draft(
+        self, draft: EmailDraft, recipient: str, files: list | None = None
+    ) -> str:
+        """Create a draft reply in Outlook and optionally attach OneDrive files.
 
-        This creates the message via the Graph API but does NOT send it.
-        The user can review and send it manually from Outlook.
+        Posts the draft to the Graph API `/me/messages` endpoint (which creates
+        it in the Drafts folder). If `files` is provided, calls `attach_files`
+        to download each file from OneDrive and upload it as an attachment.
 
         Args:
-            draft: The drafted reply, including subject and body text.
-            recipient: The email address the draft should be addressed to.
+            draft: The composed reply containing subject and body.
+            recipient: The email address the draft will be addressed to.
+            files: Optional list of OneDrive file dicts (must have 'id' and
+                'name' keys) to attach to the draft.
+
+        Returns:
+            The Graph API message ID of the newly created draft.
         """
         response = httpx.post(
             f"{_GRAPH_BASE}/me/messages",
@@ -118,4 +140,54 @@ class GraphClient:
             },
             timeout=30.0,
         )
+
         response.raise_for_status()
+        draft_id = response.json()["id"]
+        logger.info("Draft created in Outlook: draft_id=%s recipient=%r", draft_id, recipient)
+
+        if files:
+            self.attach_files(draft_id, files)
+
+        return draft_id
+
+    def attach_files(self, draft_id: str, files: list) -> None:
+        """Download files from OneDrive and attach them to a draft message.
+
+        Downloads each file's binary content via the Graph API, base64-encodes
+        it, and uploads it as a `fileAttachment`. Files that fail to download or
+        attach are skipped with a warning so a single bad file does not block the
+        rest of the draft.
+
+        Args:
+            draft_id: The Graph API message ID of the draft to attach files to.
+            files: A list of dicts, each with at least 'id' (OneDrive item ID)
+                and 'name' (file name) keys.
+        """
+        import base64
+
+        for file in files:
+            try:
+                content_response = httpx.get(
+                    f"{_GRAPH_BASE}/me/drive/items/{file['id']}/content",
+                    headers=self._headers(),
+                    timeout=60.0,
+                    follow_redirects=True,
+                )
+                content_response.raise_for_status()
+                encoded = base64.b64encode(content_response.content).decode()
+                httpx.post(
+                    f"{_GRAPH_BASE}/me/messages/{draft_id}/attachments",
+                    headers=self._headers(),
+                    json={
+                        "@odata.type": "#microsoft.graph.fileAttachment",
+                        "name": file["name"],
+                        "contentBytes": encoded,
+                    },
+                    timeout=60.0,
+                )
+                logger.debug("Attached file %r to draft %s", file["name"], draft_id)
+            except httpx.HTTPStatusError as e:
+                logger.warning(
+                    "Skipping attachment %r: HTTP %s", file["name"], e.response.status_code
+                )
+                continue

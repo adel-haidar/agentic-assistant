@@ -1,7 +1,11 @@
 import json
+import logging
 
 from assistant.email.model import EmailDraft, EmailMessage
 from assistant.shared.base_llm_service import BaseLLMService
+from assistant.shared.onedrive_client import OneDriveFile
+
+logger = logging.getLogger(__name__)
 
 
 class EmailResponseWriter(BaseLLMService):
@@ -20,7 +24,7 @@ class EmailResponseWriter(BaseLLMService):
         self,
         email: EmailMessage,
         context: str = "",
-        relevant_docs: list[str] | None = None,
+        relevant_docs: list[OneDriveFile] | None = None,
     ) -> EmailDraft:
         """Ask the LLM to draft a reply to the given email.
 
@@ -82,6 +86,8 @@ class EmailResponseWriter(BaseLLMService):
             if email.subject.lower().startswith("re:")
             else f"Re: {email.subject}"
         )
-        return EmailDraft(
+        draft = EmailDraft(
             message_id=email.id, subject=subject, draft_body=data["response_draft"]
         )
+        logger.info("Draft written for %r subject=%r", email.sender, draft.subject)
+        return draft
