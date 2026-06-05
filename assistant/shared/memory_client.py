@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import ast
+import httpx
 
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -23,7 +24,9 @@ class MemoryClient(BaseLLMService):
     endpoint (typically /mcp) for all JSON-RPC messages.
     """
 
-    def __init__(self, bedrock_client, model_id: str, server_url: str):
+    def __init__(
+        self, bedrock_client, model_id: str, server_url: str, token: str = None
+    ):
         """Configure the client with the streamable-HTTP endpoint of the memory server.
 
         Args:
@@ -32,6 +35,7 @@ class MemoryClient(BaseLLMService):
         """
         super().__init__(bedrock_client=bedrock_client, model_id=model_id)
         self._server_url = server_url
+        self._token = token
         if not server_url.endswith("/mcp"):
             logger.warning(
                 "MCP_MEMORY_URL %r does not end with '/mcp' — "
@@ -80,7 +84,9 @@ class MemoryClient(BaseLLMService):
             raw = self._strip_markdown(self._invoke(prompt))
             queries = ast.literal_eval(raw)
             logger.debug(
-                "Memory search: %d queries for email from %r", len(queries), email.sender
+                "Memory search: %d queries for email from %r",
+                len(queries),
+                email.sender,
             )
             result = "Context that might be relevant"
             for query in queries:
@@ -92,16 +98,21 @@ class MemoryClient(BaseLLMService):
             )
             return ""
 
+
     async def _search(self, query: str) -> str:
         """Internal async implementation that performs the actual MCP call."""
-        async with streamable_http_client(url=self._server_url) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                result = await session.call_tool("search", {"query": query})
-                if result.isError or not result.content:
-                    return ""
-                return "\n".join(
-                    item.text
-                    for item in result.content
-                    if hasattr(item, "text") and item.text
-                )
+        headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
+        async with httpx.AsyncClient(headers=headers) as http_client:
+            async with streamable_http_client(
+                url=self._server_url, http_client=http_client
+            ) as (read, write, _):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool("search", {"query": query})
+                    if result.isError or not result.content:
+                        return ""
+                    return "\n".join(
+                        item.text
+                        for item in result.content
+                        if hasattr(item, "text") and item.text
+                    )

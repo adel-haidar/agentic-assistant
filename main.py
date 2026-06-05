@@ -31,6 +31,18 @@ TokenStoreDep = Annotated[MicrosoftTokenStore, Depends(get_token_store)]
 delta_links: dict[str, str | None] = {"inbox": None, "junkemail": None}
 
 
+def get_fresh_token() -> str:
+    response = httpx.post(
+        "http://localhost:8002/oauth/token",
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": os.environ["MCP_MEMORY_REFRESH_TOKEN"],
+            "client_id": os.environ["MCP_MEMORY_CLIENT_ID"],
+        },
+    )
+    return response.json()["access_token"]
+
+
 @lru_cache
 def _get_bedrock_client(region: str):
     """Create a boto3 Bedrock client for the given AWS region, cached per region.
@@ -125,11 +137,14 @@ def sync_email(token_store: TokenStoreDep, settings: SettingsDep):
         model_id=settings.bedrock_model_id,
         token_store=token_store,
     )
+    token = get_fresh_token() if settings.mcp_memory_url else None
+
     memory_client = (
         MemoryClient(
             bedrock_client=bedrock_client,
             model_id=settings.bedrock_model_id,
             server_url=settings.mcp_memory_url,
+            token=token,
         )
         if settings.mcp_memory_url
         else None
