@@ -99,6 +99,49 @@ class MemoryClient(BaseLLMService):
             return ""
 
 
+    _BANK_STATEMENT_QUERY = (
+        "Bank account statement Kontoauszug with transactions, income, expenses, and balance"
+    )
+
+    # Semantic queries for supplementary financial context (prior analyses,
+    # spending notes, savings goals). The bank statement itself is fetched
+    # separately via fetch_bank_statement().
+    _FINANCIAL_CONTEXT_QUERIES = [
+        "Conversations or notes about personal finances, monthly spending, costs, budget, or savings goals",
+        "Previous financial analysis, spending assessment, budget recommendations, or yearly savings progress",
+    ]
+
+    def fetch_bank_statement(self) -> str:
+        """Fetch the most recent bank statement from the MCP memory server.
+
+        Returns:
+            The raw statement text, or an empty string if nothing is found.
+        """
+        try:
+            return asyncio.run(self._search(self._BANK_STATEMENT_QUERY))
+        except Exception:
+            logger.warning("Failed to fetch bank statement from memory", exc_info=True)
+            return ""
+
+    def search_financial_context(self) -> str:
+        """Search for supplementary financial context: prior analyses, spending
+        conversations, and savings goal notes.
+
+        Returns:
+            A multi-line string of memory results, or an empty string if the
+            memory server is unreachable or all queries return nothing.
+        """
+        parts: list[str] = []
+        for query in self._FINANCIAL_CONTEXT_QUERIES:
+            try:
+                result = asyncio.run(self._search(query))
+                if result:
+                    parts.append(result)
+            except Exception:
+                logger.warning("Financial memory search failed for query %r", query, exc_info=True)
+
+        return "\n".join(parts)
+
     async def _search(self, query: str) -> str:
         """Internal async implementation that performs the actual MCP call."""
         headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}

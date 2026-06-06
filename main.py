@@ -7,6 +7,7 @@ from botocore import model
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
 
+from assistant.banking.bank_adviser import BankAdviser
 from assistant.email.auth_service import MicrosoftTokenStore, get_token_store
 from assistant.email.email_assessor import EmailAssessor
 from assistant.email.email_response_writer import EmailResponseWriter
@@ -181,3 +182,45 @@ def sync_email(token_store: TokenStoreDep, settings: SettingsDep):
             logger.info("Draft saved for %s", email.sender)
 
     return result
+
+
+@app.post("/banking/analyse")
+def analyse_bank_statement(settings: SettingsDep):
+    """Run a full financial analysis using the bank statement stored in memory.
+
+    Fetches the bank statement and supplementary financial context (prior analyses,
+    savings goals, spending notes) from the MCP memory server, then asks the LLM
+    to categorise transactions, track yearly savings progress, propose next-month
+    budgets, and surface savings opportunities.
+
+    Returns:
+        The raw JSON analysis object produced by the BankAdviser.
+
+    Raises:
+        HTTPException (503): If MCP_MEMORY_URL is not configured, since the bank
+            statement can only be sourced from memory.
+    """
+    if not settings.mcp_memory_url:
+        raise HTTPException(
+            status_code=503,
+            detail="MCP_MEMORY_URL is not configured — bank statement cannot be sourced.",
+        )
+
+    bedrock_client = _get_bedrock_client(settings.aws_region)
+    token = get_fresh_token()
+    memory_client = MemoryClient(
+        bedrock_client=bedrock_client,
+        model_id=settings.bedrock_model_id,
+        server_url=settings.mcp_memory_url,
+        token=token,
+    )
+
+    statement = memory_client.fetch_bank_statement()
+    context = memory_client.search_financial_context()
+
+    bank_adviser = BankAdviser(
+        bedrock_client=bedrock_client,
+        model_id=settings.bedrock_model_id,
+    )
+
+    return bank_adviser.analyse(statement=statement, context=context)
