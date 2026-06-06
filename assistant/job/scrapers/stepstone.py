@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from typing import Optional
 from urllib.parse import quote_plus
 
@@ -9,6 +10,22 @@ from assistant.job.scrapers.base import BaseScraper
 logger = logging.getLogger(__name__)
 
 _MIN_DESC_LEN = 100
+
+# StepStone job detail URLs contain a long slug followed by a numeric ID
+_JOB_URL_RE = re.compile(
+    r"stepstone\.de/(?:stellenangebote--|jobs/.+/[a-z0-9-]+-\d{6,})",
+    re.IGNORECASE,
+)
+
+# Selectors tried in order; StepStone updates class names/data attrs periodically
+_CARD_SELECTORS = [
+    "article[data-at='job-item']",
+    "[data-at='job-item']",
+    "[data-genesis-element='VERTICAL_JOB_CARD']",
+    "article[class*='JobCard']",
+    "div[data-at='job-item']",
+    "[data-testid='job-item']",
+]
 
 
 class StepStoneScraper(BaseScraper):
@@ -38,7 +55,8 @@ class StepStoneScraper(BaseScraper):
                     extra_http_headers={"Accept-Language": "de-DE,de;q=0.9"},
                 )
                 page = await ctx.new_page()
-                await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                # networkidle waits for React to finish rendering job cards
+                await page.goto(url, wait_until="networkidle", timeout=45_000)
                 await _dismiss_cookie_banner(page)
 
                 detail_urls = await _collect_detail_urls(page)
@@ -72,37 +90,54 @@ async def _dismiss_cookie_banner(page) -> None:
 
 
 async def _collect_detail_urls(page) -> list[str]:
-    try:
-        await page.wait_for_selector(
-            "article[data-at='job-item'], [data-at='job-item-title']",
-            timeout=15_000,
-        )
-    except Exception:
-        content = await page.content()
-        title = await page.title()
-        logger.warning(
-            "StepStone: no job cards found. Title: %r. Content[:500]: %.500s",
-            title, content,
-        )
-        return []
+    # Try known card selectors first (fastest path)
+    for sel in _CARD_SELECTORS:
+        try:
+            await page.wait_for_selector(sel, timeout=4_000)
+            hrefs: list[str] = await page.eval_on_selector_all(
+                f"{sel} a",
+                "els => [...new Set(els.map(el => el.href).filter(Boolean))]",
+            )
+            job_urls = [h for h in hrefs if _is_job_detail_url(h)]
+            if job_urls:
+                logger.debug("StepStone: found %d URLs via selector %r", len(job_urls), sel)
+                return job_urls
+        except Exception:
+            continue
 
-    hrefs: list[str] = await page.eval_on_selector_all(
-        "article[data-at='job-item'] a, [data-at='job-item-title']",
-        "els => [...new Set(els.map(el => el.href).filter(Boolean))]",
-    )
-    return [h for h in hrefs if "/stellenangebote/" in h or "/jobs/" in h]
+    # Fallback: scan every link on the page for job-like URLs
+    try:
+        all_hrefs: list[str] = await page.eval_on_selector_all(
+            "a[href]",
+            "els => els.map(el => el.href).filter(Boolean)",
+        )
+        job_urls = list(dict.fromkeys(h for h in all_hrefs if _is_job_detail_url(h)))
+        if job_urls:
+            logger.info("StepStone: found %d URLs via link scan fallback", len(job_urls))
+            return job_urls
+    except Exception:
+        pass
+
+    title = await page.title()
+    logger.warning("StepStone: 0 job URLs found. Page title: %r", title)
+    return []
+
+
+def _is_job_detail_url(href: str) -> bool:
+    return bool(_JOB_URL_RE.search(href))
 
 
 async def _scrape_detail(
     page, url: str, country: str, city: Optional[str]
 ) -> Optional[JobListing]:
     try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+        await page.goto(url, wait_until="networkidle", timeout=30_000)
 
         title = await _first_text(
             page,
             [
                 "h1[data-at='header-job-title']",
+                "h1[data-genesis-element='HEADING']",
                 "h1.listing-content-provider--heading",
                 "h1",
             ],
@@ -112,8 +147,10 @@ async def _scrape_detail(
             page,
             [
                 "[data-at='header-company-name']",
+                "[data-genesis-element='COMPANY_NAME']",
                 ".listing-content-provider--company",
                 "a[href*='/company/']",
+                "a[href*='/unternehmen/']",
             ],
         )
 
@@ -121,6 +158,7 @@ async def _scrape_detail(
             page,
             [
                 "[data-at='job-header-location']",
+                "[data-genesis-element='LOCATION']",
                 ".listing-content-provider--location",
                 "[class*='Location']",
             ],
@@ -130,6 +168,7 @@ async def _scrape_detail(
             page,
             [
                 "[data-at='jobad-description']",
+                "[data-genesis-element='JOB_DESCRIPTION']",
                 ".listing-content-provider--text",
                 "article",
                 "main",
