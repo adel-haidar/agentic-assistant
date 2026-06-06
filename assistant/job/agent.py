@@ -9,9 +9,7 @@ from assistant.job.db import count_all, init_pool, upsert_match
 from assistant.job.models import JobListing, RunReport, ScoredListing
 from assistant.job.report import format_report
 from assistant.job.scorer import JobScorer
-from assistant.job.scrapers.indeed import IndeedScraper
 from assistant.job.scrapers.jobs_ch import JobsChScraper
-from assistant.job.scrapers.linkedin import LinkedInScraper
 from assistant.job.scrapers.rapidapi import RapidApiScraper
 from assistant.job.scrapers.stepstone import StepStoneScraper
 
@@ -106,16 +104,21 @@ async def run_agent(
     pool = await init_pool(database_url)
     scorer = JobScorer(bedrock_client=bedrock_client, model_id=model_id)
 
+    # LinkedIn and Indeed block AWS EC2 IPs at the network level — standalone scrapers
+    # for those platforms will never succeed from this host. JSearch (RAPIDAPI_KEY)
+    # routes through its own proxy infrastructure and is the only reliable source.
     scrapers = []
     if rapidapi_key:
         scrapers.append(
             RapidApiScraper(rapidapi_key, rapidapi_host, delay_seconds, max_per_query)
         )
     else:
-        scrapers.append(LinkedInScraper(delay_seconds, max_per_query))
+        logger.warning(
+            "RAPIDAPI_KEY not set — LinkedIn and Indeed results unavailable. "
+            "Set RAPIDAPI_KEY to enable JSearch coverage for both platforms."
+        )
     scrapers += [
         JobsChScraper(delay_seconds, max_per_query),
-        IndeedScraper(delay_seconds, max_per_query),
         StepStoneScraper(delay_seconds, max_per_query),
     ]
 
