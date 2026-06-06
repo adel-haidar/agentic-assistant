@@ -99,9 +99,7 @@ class MemoryClient(BaseLLMService):
             return ""
 
 
-    _BANK_STATEMENT_QUERY = (
-        "Bank account statement Kontoauszug with transactions, income, expenses, and balance"
-    )
+    _BANK_STATEMENT_QUERY = "Konto Auszug"
 
     # Semantic queries for supplementary financial context (prior analyses,
     # spending notes, savings goals). The bank statement itself is fetched
@@ -140,6 +138,30 @@ class MemoryClient(BaseLLMService):
             except Exception:
                 logger.warning("Financial memory search failed for query %r", query, exc_info=True)
 
+        return "\n".join(parts)
+
+    async def fetch_bank_statement_for_month(self, month: str) -> str:
+        """Fetch a specific month's bank statement from MCP memory.
+
+        Args:
+            month: The month to search for, e.g. '2026-01'.
+        """
+        try:
+            return await self._search(f"bank statement {month}")
+        except Exception:
+            logger.warning("Failed to fetch bank statement for month %r", month, exc_info=True)
+            return ""
+
+    async def fetch_financial_context(self) -> str:
+        """Async version: search for supplementary financial context."""
+        parts: list[str] = []
+        for query in self._FINANCIAL_CONTEXT_QUERIES:
+            try:
+                result = await self._search(query)
+                if result:
+                    parts.append(result)
+            except Exception:
+                logger.warning("Financial memory search failed for query %r", query, exc_info=True)
         return "\n".join(parts)
 
     async def _search(self, query: str) -> str:

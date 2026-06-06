@@ -3,11 +3,14 @@ import httpx
 import boto3
 import os
 
+from calendar import monthrange
+from datetime import date, datetime
 from functools import lru_cache
-from typing import Annotated
-from botocore import model
+from typing import Annotated, Literal
+
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
+from pydantic import BaseModel
 
 from assistant.banking.bank_adviser import BankAdviser
 from assistant.email.auth_service import MicrosoftTokenStore, get_token_store
@@ -21,6 +24,47 @@ from assistant.shared.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 app = FastAPI()
+
+
+class AnalyseRequest(BaseModel):
+    context: str = ""
+    mode: Literal["ytd", "single", "range"] = "ytd"
+    period_from: str | None = None  # "YYYY-MM"
+    period_to: str | None = None    # "YYYY-MM"
+
+
+def resolve_period(
+    mode: str,
+    period_from: str | None,
+    period_to: str | None,
+) -> list[str]:
+    """Return list of 'YYYY-MM' strings for the requested range."""
+    today = date.today()
+
+    if mode == "ytd":
+        start = date(today.year, 1, 1)
+        end   = date(today.year, today.month, 1)
+    elif mode == "single":
+        if not period_from:
+            raise ValueError("period_from required for mode=single")
+        start = end = datetime.strptime(period_from, "%Y-%m").date()
+    elif mode == "range":
+        if not period_from or not period_to:
+            raise ValueError("period_from and period_to required for mode=range")
+        start = datetime.strptime(period_from, "%Y-%m").date()
+        end   = datetime.strptime(period_to,   "%Y-%m").date()
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
+
+    months: list[str] = []
+    current = start
+    while current <= end:
+        months.append(current.strftime("%Y-%m"))
+        if current.month == 12:
+            current = current.replace(year=current.year + 1, month=1)
+        else:
+            current = current.replace(month=current.month + 1)
+    return months
 
 # These are type aliases that tell FastAPI how to inject dependencies into route
 # functions. When a route function declares a parameter with one of these types,
@@ -186,27 +230,28 @@ def sync_email(token_store: TokenStoreDep, settings: SettingsDep):
     return result
 
 
-@app.get("/banking/analyse")
-def analyse_bank_statement(settings: SettingsDep):
-    """Run a full financial analysis using the bank statement stored in memory.
+@app.post("/banking/analyse")
+async def analyse_bank_statement(req: AnalyseRequest, settings: SettingsDep):
+    """Run a multi-month financial analysis using bank statements from MCP memory.
 
-    Fetches the bank statement and supplementary financial context (prior analyses,
-    savings goals, spending notes) from the MCP memory server, then asks the LLM
-    to categorise transactions, track yearly savings progress, propose next-month
-    budgets, and surface savings opportunities.
-
-    Returns:
-        The raw JSON analysis object produced by the BankAdviser.
+    Accepts an explicit period (ytd / single / range), searches MCP once per month
+    in the range, feeds all results to the LLM, and returns a holistic analysis.
 
     Raises:
-        HTTPException (503): If MCP_MEMORY_URL is not configured, since the bank
-            statement can only be sourced from memory.
+        HTTPException (400): If the request period params are invalid.
+        HTTPException (404): If no bank statements are found for the requested period.
+        HTTPException (503): If MCP_MEMORY_URL is not configured.
     """
     if not settings.mcp_memory_url:
         raise HTTPException(
             status_code=503,
             detail="MCP_MEMORY_URL is not configured — bank statement cannot be sourced.",
         )
+
+    try:
+        months = resolve_period(req.mode, req.period_from, req.period_to)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     bedrock_client = _get_bedrock_client(settings.aws_region)
     token = get_fresh_token()
@@ -217,12 +262,39 @@ def analyse_bank_statement(settings: SettingsDep):
         token=token,
     )
 
-    statement = memory_client.fetch_bank_statement()
-    context = memory_client.search_financial_context()
+    all_statements: list[str] = []
+    missing_months: list[str] = []
+
+    for month in months:
+        content = await memory_client.fetch_bank_statement_for_month(month)
+        if content:
+            all_statements.append(f"=== BANK STATEMENT {month} ===\n{content}")
+        else:
+            missing_months.append(month)
+
+    if not all_statements:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No bank statements found in MCP memory for "
+                f"period {months[0]} – {months[-1]}. "
+                f"Please upload statements via the File Repository."
+            ),
+        )
+
+    statements_context = "\n\n".join(all_statements)
+    if missing_months:
+        statements_context += (
+            f"\n\nNOTE: No data found for: {', '.join(missing_months)}. "
+            f"Exclude these months from the analysis."
+        )
+
+    financial_context = await memory_client.fetch_financial_context()
+    combined_context = financial_context + ("\n\n" + req.context if req.context else "")
 
     bank_adviser = BankAdviser(
         bedrock_client=bedrock_client,
         model_id=settings.bedrock_model_id,
     )
 
-    return bank_adviser.analyse(statement=statement, context=context)
+    return bank_adviser.analyse(statement=statements_context, context=combined_context)

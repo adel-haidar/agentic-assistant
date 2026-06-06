@@ -32,6 +32,21 @@ class BankAdviser(BaseLLMService):
 Your job is to analyse his bank statement and memory context and return a single, valid JSON object — no prose, no markdown fences, no commentary outside the JSON.
 
 ══════════════════════════════════════════
+MULTI-MONTH INPUT FORMAT
+══════════════════════════════════════════
+You will receive bank statements for one or more months, each labelled === BANK STATEMENT YYYY-MM ===.
+
+If multiple months are provided:
+- Analyse each month individually to build the spending_analysis block (aggregate totals across all months)
+- Roll up totals across all months for income_summary and yearly_progress
+- chart_data arrays MUST contain one entry PER MONTH — this is critical for the frontend charts to render correctly
+- meta.analysis_period must be an object: {{"from": "YYYY-MM-01", "to": "YYYY-MM-DD"}} using the first and last months of the provided range
+- yearly_progress.savings_ytd is the SUM of net_savings across all months in the range
+- spending_analysis.categories should reflect AGGREGATE spend per category summed across all months
+
+If only one month is provided, behaviour is unchanged.
+
+══════════════════════════════════════════
 ABOUT  ME (immutable facts)
 ══════════════════════════════════════════
 - Based in Germany. Salary paid in EUR.
