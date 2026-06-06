@@ -11,9 +11,10 @@ logger = logging.getLogger(__name__)
 
 _MIN_DESC_LEN = 100
 
-# StepStone job detail URLs contain a long slug followed by a numeric ID
+# Job detail pages contain a 7+ digit numeric ID separated by / or - in the path.
+# Search/category pages like /jobs/Java-Developer/in-Zurich do not.
 _JOB_URL_RE = re.compile(
-    r"stepstone\.de/(?:stellenangebote--|jobs/.+/[a-z0-9-]+-\d{6,})",
+    r"stepstone\.de/(?:stellenangebote--|.*[-/]\d{7,})",
     re.IGNORECASE,
 )
 
@@ -55,9 +56,10 @@ class StepStoneScraper(BaseScraper):
                     extra_http_headers={"Accept-Language": "de-DE,de;q=0.9"},
                 )
                 page = await ctx.new_page()
-                # networkidle waits for React to finish rendering job cards
-                await page.goto(url, wait_until="networkidle", timeout=45_000)
+                await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
                 await _dismiss_cookie_banner(page)
+                # Give React time to render job cards after DOMContentLoaded
+                await asyncio.sleep(3)
 
                 detail_urls = await _collect_detail_urls(page)
                 for detail_url in detail_urls[: self._max]:
@@ -131,7 +133,8 @@ async def _scrape_detail(
     page, url: str, country: str, city: Optional[str]
 ) -> Optional[JobListing]:
     try:
-        await page.goto(url, wait_until="networkidle", timeout=30_000)
+        await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+        await asyncio.sleep(2)
 
         title = await _first_text(
             page,
