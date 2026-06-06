@@ -186,7 +186,7 @@ def sync_email(token_store: TokenStoreDep, settings: SettingsDep):
     return result
 
 
-@app.post("/banking/analyse")
+@app.get("/banking/analyse")
 def analyse_bank_statement(settings: SettingsDep):
     """Run a full financial analysis using the bank statement stored in memory.
 
