@@ -73,18 +73,27 @@ async def _collect_detail_urls(page) -> list[str]:
             "a[href*='/en/vacancies/']", timeout=15_000
         )
     except Exception:
+        content = await page.content()
+        title = await page.title()
+        logger.warning(
+            "jobs.ch: no job links found. Title: %r. Content[:500]: %.500s",
+            title, content,
+        )
         return []
 
     hrefs: list[str] = await page.eval_on_selector_all(
-        "a[href*='/en/vacancies/']",
+        "a[href*='/en/vacancies/detail/']",
         "els => els.map(el => el.href)",
     )
     seen: set[str] = set()
     result: list[str] = []
     for href in hrefs:
-        if href and href not in seen and len(href) > len(_SEARCH_URL) + 10:
+        if href and href not in seen:
             seen.add(href)
             result.append(href)
+    if not result:
+        title = await page.title()
+        logger.warning("jobs.ch: 0 detail URLs found. Page title: %r", title)
     return result
 
 
@@ -102,14 +111,7 @@ async def _scrape_detail(
             page_title = await page.title()
             title = page_title.split("|")[0].strip() if page_title else ""
 
-        company = await _first_text(
-            page,
-            [
-                "[data-cy='company-name']",
-                ".company-name",
-                "a[href*='/companies/']",
-            ],
-        )
+        company = await _extract_company(page)
 
         location_str = await _first_text(
             page,
@@ -140,6 +142,59 @@ async def _scrape_detail(
         )
     except Exception:
         logger.warning("jobs.ch detail scrape failed: %s", url)
+        return None
+
+
+_COMPANY_SELECTORS = [
+    "h2.company-name",
+    "[data-cy='company-name']",
+    ".job-header__company",
+    "a.company-link",
+]
+
+
+async def _extract_company(page) -> str:
+    for selector in _COMPANY_SELECTORS:
+        try:
+            el = await page.query_selector(selector)
+            if el:
+                text = (await el.inner_text()).strip()
+                if text and text.lower() not in ("explore companies", ""):
+                    return text
+        except Exception:
+            continue
+    try:
+        el = await page.query_selector("meta[property='og:site_name']")
+        if el:
+            text = (await el.get_attribute("content") or "").strip()
+            if text and text.lower() not in ("explore companies", "jobs.ch", ""):
+                return text
+    except Exception:
+        pass
+    return "Unknown"
+
+
+async def extract_company_from_url(url: str) -> Optional[str]:
+    """Re-fetch a jobs.ch detail page and extract the correct company name."""
+    from playwright.async_api import async_playwright
+
+    try:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True)
+            ctx = await browser.new_context(
+                extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+                user_agent=(
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                ),
+            )
+            page = await ctx.new_page()
+            await page.goto(url, wait_until="networkidle", timeout=20_000)
+            company = await _extract_company(page)
+            await browser.close()
+            return company if company != "Unknown" else None
+    except Exception:
+        logger.warning("Company re-fetch failed for %s", url)
         return None
 
 

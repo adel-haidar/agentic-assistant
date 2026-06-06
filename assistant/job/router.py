@@ -6,7 +6,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from assistant.job import agent as job_agent
-from assistant.job.db import init_pool, list_matches, set_status
+from assistant.job.db import init_pool, list_matches, list_unknown_companies, set_status, update_company
 from assistant.job.models import RunReport
 from assistant.job.report import format_report
 from assistant.shared.settings import Settings, get_settings
@@ -66,6 +66,42 @@ async def update_status(
             "Valid: new | reviewing | applied | interviewing | rejected | withdrawn | expired",
         )
     return {"id": match_id, "status": body.status}
+
+
+@router.get("/fix-companies")
+async def fix_companies(settings: Settings = Depends(get_settings)):
+    """One-time migration: re-fetch company names for rows with 'Explore companies' or 'Unknown'."""
+    if not settings.database_url:
+        raise HTTPException(503, "DATABASE_URL is not configured")
+    pool = await init_pool(settings.database_url)
+    rows = await list_unknown_companies(pool)
+    if not rows:
+        return {"message": "No rows to fix", "updated": 0}
+
+    from assistant.job.scrapers.jobs_ch import extract_company_from_url
+
+    updated = 0
+    skipped = 0
+    for row in rows:
+        url: str = row["job_url"]
+        platform: str = row["platform"]
+        if platform != "jobs.ch":
+            skipped += 1
+            continue
+        company = await extract_company_from_url(url)
+        if company:
+            ok = await update_company(pool, url, company)
+            if ok:
+                updated += 1
+                logger.info("fix-companies: updated %s → %r", url, company)
+        else:
+            logger.warning("fix-companies: could not extract company for %s", url)
+
+    return {
+        "message": f"Updated {updated} rows ({skipped} non-jobs.ch skipped)",
+        "updated": updated,
+        "skipped": skipped,
+    }
 
 
 @router.get("/report")

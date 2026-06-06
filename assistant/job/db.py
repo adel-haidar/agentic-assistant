@@ -61,8 +61,15 @@ def get_pool() -> asyncpg.Pool:
     return _pool
 
 
-async def upsert_match(pool: asyncpg.Pool, listing: JobListing, result: MatchResult) -> Optional[int]:
-    """Insert or conditionally update a job match. Returns the row ID."""
+async def upsert_match(
+    pool: asyncpg.Pool, listing: JobListing, result: MatchResult
+) -> tuple[Optional[int], bool]:
+    """Insert or conditionally update a job match.
+
+    Returns (row_id, was_saved) where was_saved is True only for a fresh insert
+    or a score-bump update.  False means the row already existed and was not
+    changed (conflict guard fired or status was protected).
+    """
     async with pool.acquire() as conn:
         try:
             row = await conn.fetchrow(
@@ -95,15 +102,33 @@ async def upsert_match(pool: asyncpg.Pool, listing: JobListing, result: MatchRes
                 result.ai_summary,
             )
             if row:
-                return row["id"]
-            # Conflict resolved without update — row already exists (status protected or score not better)
+                return row["id"], True
+            # Conflict resolved without update — already exists, not worth updating
             existing = await conn.fetchrow(
                 "SELECT id FROM job_matches WHERE job_url = $1", listing.job_url
             )
-            return existing["id"] if existing else None
+            return (existing["id"] if existing else None), False
         except Exception:
             logger.exception("DB upsert failed for %s", listing.job_url)
-            return None
+            return None, False
+
+
+async def list_unknown_companies(pool: asyncpg.Pool) -> list[dict]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, job_url, platform FROM job_matches "
+            "WHERE company IN ('Explore companies', 'Unknown')"
+        )
+        return [dict(r) for r in rows]
+
+
+async def update_company(pool: asyncpg.Pool, job_url: str, company: str) -> bool:
+    async with pool.acquire() as conn:
+        tag = await conn.execute(
+            "UPDATE job_matches SET company = $1 WHERE job_url = $2",
+            company, job_url,
+        )
+        return tag == "UPDATE 1"
 
 
 async def count_all(pool: asyncpg.Pool) -> int:

@@ -37,10 +37,9 @@ class IndeedScraper(BaseScraper):
             async with async_playwright() as pw:
                 browser = await pw.chromium.launch(headless=True)
                 ctx = await browser.new_context(
-                    user_agent=(
-                        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-                    ),
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+                    viewport={"width": 1920, "height": 1080},
+                    locale="de-CH",
                     extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
                 )
                 page = await ctx.new_page()
@@ -85,6 +84,12 @@ async def _collect_detail_urls(page, domain: str) -> list[str]:
             timeout=15_000,
         )
     except Exception:
+        content = await page.content()
+        title = await page.title()
+        logger.warning(
+            "Indeed: no job cards found. Title: %r. Content[:500]: %.500s",
+            title, content,
+        )
         return []
 
     hrefs: list[str] = await page.eval_on_selector_all(

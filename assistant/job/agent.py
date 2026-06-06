@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from collections import defaultdict
 from datetime import datetime
 from typing import Optional
@@ -10,6 +11,7 @@ from assistant.job.report import format_report
 from assistant.job.scorer import JobScorer
 from assistant.job.scrapers.indeed import IndeedScraper
 from assistant.job.scrapers.jobs_ch import JobsChScraper
+from assistant.job.scrapers.linkedin import LinkedInScraper
 from assistant.job.scrapers.rapidapi import RapidApiScraper
 from assistant.job.scrapers.stepstone import StepStoneScraper
 
@@ -51,6 +53,43 @@ def _dedup_key(listing: JobListing) -> str:
     )
 
 
+_SEARCH_PAGE_TITLE_PATTERNS = [
+    re.compile(r"^\d+\s+job", re.I),
+    re.compile(r"^\d[\d\s,]+job", re.I),
+    re.compile(r"job offers?\s*-\s*", re.I),
+    re.compile(r"job offer[s]? in\s+", re.I),
+]
+
+_HARD_REJECT_DOMAINS = [
+    "quantitative finance", "portfolio construction", "factor models",
+    "backtesting", "covariance estimation", "cvxpy", "mosek",
+]
+
+
+def is_search_results_page(listing: JobListing) -> bool:
+    if "jobs.ch" in listing.job_url and "/detail/" not in listing.job_url:
+        return True
+    title_lower = listing.title.lower().strip()
+    return any(p.search(title_lower) for p in _SEARCH_PAGE_TITLE_PATTERNS)
+
+
+def pre_filter_technology_mismatch(listing: JobListing) -> bool:
+    text = (listing.description + " " + listing.title).lower()
+    if "java" not in text:
+        return True
+    java_idx = text.index("java")
+    python_primary = sum([
+        "python" in text and text.index("python") < java_idx,
+        "python developer" in text,
+        "python engineer" in text,
+        "quantitative developer" in text,
+        "quant developer" in text,
+    ])
+    if python_primary >= 2:
+        return True
+    return any(domain in text for domain in _HARD_REJECT_DOMAINS)
+
+
 async def run_agent(
     database_url: str,
     bedrock_client,
@@ -72,6 +111,8 @@ async def run_agent(
         scrapers.append(
             RapidApiScraper(rapidapi_key, rapidapi_host, delay_seconds, max_per_query)
         )
+    else:
+        scrapers.append(LinkedInScraper(delay_seconds, max_per_query))
     scrapers += [
         JobsChScraper(delay_seconds, max_per_query),
         IndeedScraper(delay_seconds, max_per_query),
@@ -100,13 +141,18 @@ async def run_agent(
 
     raw_count = len(all_raw)
 
+    seen_urls: set[str] = set()
     seen_keys: set[str] = set()
     deduped: list[JobListing] = []
     for listing in all_raw:
+        if listing.job_url in seen_urls:
+            continue
         key = _dedup_key(listing)
-        if key not in seen_keys:
-            seen_keys.add(key)
-            deduped.append(listing)
+        if key in seen_keys:
+            continue
+        seen_urls.add(listing.job_url)
+        seen_keys.add(key)
+        deduped.append(listing)
 
     dedup_count = len(deduped)
     logger.info("Collected %d raw, %d after dedup", raw_count, dedup_count)
@@ -120,6 +166,25 @@ async def run_agent(
 
     loop = asyncio.get_event_loop()
     for listing in deduped:
+        if is_search_results_page(listing):
+            logger.info(
+                "SEARCH_RESULTS_PAGE rejected: %r | %s", listing.title, listing.job_url
+            )
+            hard_rejected_count += 1
+            hard_rejected_by_reason["SEARCH_RESULTS_PAGE"] += 1
+            rejection_log["SEARCH_RESULTS_PAGE"].append(
+                f"{listing.company} — {listing.title}"
+            )
+            continue
+
+        if pre_filter_technology_mismatch(listing):
+            hard_rejected_count += 1
+            hard_rejected_by_reason["TECHNOLOGY_MISMATCH"] += 1
+            rejection_log["TECHNOLOGY_MISMATCH"].append(
+                f"{listing.company} — {listing.title}"
+            )
+            continue
+
         result = await loop.run_in_executor(None, scorer.score, listing)
         if result is None:
             continue
@@ -133,9 +198,9 @@ async def run_agent(
 
         tier = result.match_tier
         if tier in ("STRONG_MATCH", "GOOD_MATCH"):
-            row_id = await upsert_match(pool, listing, result)
+            row_id, is_new = await upsert_match(pool, listing, result)
             scored = ScoredListing(listing=listing, result=result, db_id=row_id)
-            if row_id:
+            if is_new:
                 db_saved += 1
             if tier == "STRONG_MATCH":
                 strong_matches.append(scored)

@@ -39,6 +39,9 @@ Hard disqualifiers (auto-reject, no scoring):
   CITIZENSHIP_RESTRICTED Swiss/Canadian/local citizens only.
   NO_SPONSORSHIP        Canada or Singapore role with no visa sponsorship mentioned.
   TECHNOLOGY_MISMATCH   C++, .NET, PHP, iOS native, pure Python ML — no Java/Spring overlap.
+                        If Java is listed only as a 'bonus' or 'nice to have' and the primary
+                        language is Python, C++, C#, Scala, or the role title is 'Quantitative
+                        Developer / Quant Developer' → HARD REJECT with TECHNOLOGY_MISMATCH.
   ALREADY_APPLIED       Company is in the active applications list.
   JUNIOR_ROLE           <3 years expected, entry-level, graduate, or trainee.
   PURE_MANAGEMENT       CTO/VP/Head with no IC track.
