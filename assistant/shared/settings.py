@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     When set, the agent queries this server for personal context before each
     email assessment. Leave unset to disable memory lookups."""
 
+    mcp_memory_client_id: str | None = None
+
+    mcp_memory_refresh_token: str | None = None
 
 @lru_cache
 def get_settings() -> Settings:

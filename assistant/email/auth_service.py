@@ -106,7 +106,7 @@ class MicrosoftTokenStore:
                 "client_secret": s.ms_client_secret,
                 "refresh_token": self._refresh_token,
                 "grant_type": "refresh_token",
-                "scope": "openid profile offline_access Mail.ReadWrite Files.Read",
+                "scope": _MS_SCOPES,
             },
             timeout=30.0,
         )
