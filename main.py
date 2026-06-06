@@ -13,6 +13,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from assistant.banking.bank_adviser import BankAdviser
+from assistant.job.router import router as job_router
 from assistant.email.auth_service import MicrosoftTokenStore, get_token_store
 from assistant.email.email_assessor import EmailAssessor
 from assistant.email.email_response_writer import EmailResponseWriter
@@ -24,6 +25,7 @@ from assistant.shared.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 app = FastAPI()
+app.include_router(job_router, prefix="/jobs")
 
 
 class AnalyseRequest(BaseModel):

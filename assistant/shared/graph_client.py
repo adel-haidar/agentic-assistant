@@ -150,6 +150,23 @@ class GraphClient:
 
         return draft_id
 
+    def send_mail(self, subject: str, body: str, recipient: str) -> None:
+        """Send an email immediately (not a draft) via the Graph API sendMail endpoint."""
+        httpx.post(
+            f"{_GRAPH_BASE}/me/sendMail",
+            headers=self._headers(),
+            json={
+                "message": {
+                    "subject": subject,
+                    "body": {"contentType": "Text", "content": body},
+                    "toRecipients": [{"emailAddress": {"address": recipient}}],
+                },
+                "saveToSentItems": "true",
+            },
+            timeout=30.0,
+        ).raise_for_status()
+        logger.info("Email sent to %r: %r", recipient, subject)
+
     def attach_files(self, draft_id: str, files: list) -> None:
         """Download files from OneDrive and attach them to a draft message.
 

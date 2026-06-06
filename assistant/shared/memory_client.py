@@ -164,6 +164,35 @@ class MemoryClient(BaseLLMService):
                 logger.warning("Financial memory search failed for query %r", query, exc_info=True)
         return "\n".join(parts)
 
+    async def save_job_run(
+        self,
+        date: str,
+        strong_count: int,
+        good_count: int,
+        top_summary: str,
+    ) -> None:
+        """Persist a job hunt run summary to the MCP memory server."""
+        content = (
+            f"Run on {date}. {strong_count} strong matches, {good_count} good matches saved to DB."
+            f"{top_summary}"
+        )
+        headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
+        async with httpx.AsyncClient(headers=headers) as http_client:
+            async with streamable_http_client(
+                url=self._server_url, http_client=http_client
+            ) as (read, write, _):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    await session.call_tool(
+                        "save",
+                        {
+                            "title": f"Job Hunt Run — {date}",
+                            "tags": ["job-search", "run-summary", "switzerland"],
+                            "content": content,
+                        },
+                    )
+        logger.debug("Job run summary saved to MCP memory for %s", date)
+
     async def _search(self, query: str) -> str:
         """Internal async implementation that performs the actual MCP call."""
         headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}

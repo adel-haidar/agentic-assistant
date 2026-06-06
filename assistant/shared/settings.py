@@ -48,6 +48,26 @@ class Settings(BaseSettings):
 
     mcp_memory_refresh_token: str | None = None
 
+    # Job hunting agent
+    database_url: str | None = None
+    """PostgreSQL DSN for the job_matches table, e.g. postgresql://user:pass@localhost/adel_intelligence"""
+
+    rapidapi_key: str | None = None
+    """RapidAPI key for the JSearch / LinkedIn Jobs Search API."""
+
+    rapidapi_host: str = "jsearch.p.rapidapi.com"
+    """RapidAPI host header — override to 'linkedin-jobs-search.p.rapidapi.com' if using that API."""
+
+    scraper_delay_seconds: float = 2.0
+    """Seconds to wait between page requests to avoid rate-limiting."""
+
+    scraper_max_results_per_query: int = 20
+    """Maximum job listings to collect per search query."""
+
+    notification_email: str = "adel.haidar@outlook.com"
+    """Email address to notify when strong matches are found."""
+
+
 @lru_cache
 def get_settings() -> Settings:
     """Return the application settings, reading from environment variables once and caching the result.
