@@ -23,7 +23,7 @@ class BaseLLMService:
         self._client = bedrock_client
         self._model_id = model_id
 
-    def _invoke(self, prompt: str) -> str:
+    def _invoke(self, prompt: str, max_tokens: int = 4096) -> str:
         """Send a prompt to the LLM and return the raw text response.
 
         This wraps Bedrock's `converse` API, which works like a single-turn
@@ -44,6 +44,7 @@ class BaseLLMService:
                     "content": [{"text": prompt}],
                 }
             ],
+            inferenceConfig={"maxTokens": max_tokens},
         )
         return response["output"]["message"]["content"][0]["text"]
 

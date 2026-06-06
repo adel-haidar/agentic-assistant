@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 class BankAdviser(BaseLLMService):
     def analyse(self, statement: str, context: str = "") -> dict:
         prompt = self.create_financial_assessment(statement, context)
-        raw = self._strip_markdown(self._invoke(prompt))
+        raw = self._strip_markdown(self._invoke(prompt, max_tokens=8192))
         return json.loads(raw)
 
     def create_financial_assessment(
