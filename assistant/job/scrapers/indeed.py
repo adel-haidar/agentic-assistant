@@ -1,7 +1,13 @@
 import asyncio
 import logging
+import re
+import xml.etree.ElementTree as ET
+from html import unescape
 from typing import Optional
 from urllib.parse import quote_plus
+
+import httpx
+from bs4 import BeautifulSoup
 
 from assistant.job.models import JobListing
 from assistant.job.scrapers.base import BaseScraper
@@ -14,46 +20,59 @@ _DOMAINS = {
     "Norway": "no.indeed.com",
     "Singapore": "sg.indeed.com",
 }
+
+_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Accept": "application/rss+xml, application/xml, text/xml, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
 _MIN_DESC_LEN = 100
 
 
 class IndeedScraper(BaseScraper):
+    """Indeed jobs via the public RSS feed (avoids Cloudflare bot detection)."""
+
     name = "Indeed"
 
     async def search(
         self, query: str, country: str, city: Optional[str] = None
     ) -> list[JobListing]:
-        from playwright.async_api import async_playwright
-
         domain = _DOMAINS.get(country, "www.indeed.com")
         location = city or country
         url = (
-            f"https://{domain}/jobs"
-            f"?q={quote_plus(query)}&l={quote_plus(location)}&sort=date"
+            f"https://{domain}/rss"
+            f"?q={quote_plus(query)}"
+            f"&l={quote_plus(location)}"
+            "&sort=date&limit=25"
         )
 
         listings: list[JobListing] = []
         try:
-            async with async_playwright() as pw:
-                browser = await pw.chromium.launch(headless=True)
-                ctx = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-                    viewport={"width": 1920, "height": 1080},
-                    locale="de-CH",
-                    extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
-                )
-                page = await ctx.new_page()
-                await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-                await _dismiss_cookie_banner(page)
+            async with httpx.AsyncClient(
+                headers=_HEADERS, follow_redirects=True, timeout=30.0
+            ) as client:
+                r = await client.get(url)
+                content = r.text
+                logger.debug("Indeed RSS first 500: %.500s", content)
 
-                detail_urls = await _collect_detail_urls(page, domain)
-                for detail_url in detail_urls[: self._max]:
-                    listing = await _scrape_detail(page, detail_url, country, city)
+                if r.status_code != 200:
+                    logger.warning(
+                        "Indeed RSS returned HTTP %d for %r in %s", r.status_code, query, country
+                    )
+                    return []
+
+                items = _parse_rss(content)
+                if not items:
+                    logger.warning("Indeed: 0 RSS items for %r in %s", query, country)
+                    return []
+
+                for item in items[: self._max]:
+                    listing = await _item_to_listing(
+                        client, item, country, city, self._delay
+                    )
                     if listing:
                         listings.append(listing)
-                    await asyncio.sleep(self._delay)
-
-                await browser.close()
         except Exception:
             logger.exception(
                 "Indeed scrape failed for query=%r country=%s", query, country
@@ -63,120 +82,105 @@ class IndeedScraper(BaseScraper):
         return listings
 
 
-async def _dismiss_cookie_banner(page) -> None:
-    for selector in [
-        "#onetrust-accept-btn-handler",
-        "button:has-text('Accept all')",
-        "button:has-text('Accept')",
-    ]:
-        try:
-            await page.click(selector, timeout=2_500)
-            await asyncio.sleep(0.5)
-            return
-        except Exception:
-            pass
+def _elem_text(el, tag: str) -> str:
+    child = el.find(tag)
+    return (child.text or "").strip() if child is not None else ""
 
 
-async def _collect_detail_urls(page, domain: str) -> list[str]:
+def _get_link(item) -> str:
+    el = item.find("link")
+    if el is not None and el.text and el.text.strip().startswith("http"):
+        return el.text.strip()
+    # RSS quirk: <link> text sometimes appears as the tail of a sibling
+    for child in item:
+        if child.tail and child.tail.strip().startswith("http"):
+            return child.tail.strip()
+    # Fallback: guid often holds the URL
+    el = item.find("guid")
+    if el is not None and el.text and el.text.strip().startswith("http"):
+        return el.text.strip()
+    return ""
+
+
+def _parse_rss(xml_text: str) -> list[dict]:
     try:
-        await page.wait_for_selector(
-            ".job_seen_beacon, .tapItem, [data-testid='job-title']",
-            timeout=15_000,
-        )
-    except Exception:
-        content = await page.content()
-        title = await page.title()
-        logger.warning(
-            "Indeed: no job cards found. Title: %r. Content[:500]: %.500s",
-            title, content,
-        )
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        logger.warning("Indeed RSS XML parse error: %s", exc)
         return []
 
-    hrefs: list[str] = await page.eval_on_selector_all(
-        "a[href*='/viewjob'], a[href*='/rc/clk'], a[id^='job_']",
-        "els => els.map(el => el.href).filter(Boolean)",
-    )
-    seen: set[str] = set()
-    result: list[str] = []
-    for href in hrefs:
-        if href and href not in seen:
-            seen.add(href)
-            result.append(href)
+    result = []
+    for item in root.findall(".//item"):
+        raw_title = _elem_text(item, "title")
+        link = _get_link(item)
+        desc_html = _elem_text(item, "description")
+        company = _elem_text(item, "source")
+
+        # RSS titles often arrive as "Job Title - Company Name"
+        if not company and " - " in raw_title:
+            parts = raw_title.rsplit(" - ", 1)
+            clean_title, company = parts[0].strip(), parts[1].strip()
+        else:
+            clean_title = raw_title
+
+        desc = unescape(_HTML_TAG_RE.sub(" ", desc_html)).strip()
+
+        if link:
+            result.append(
+                {
+                    "title": clean_title,
+                    "company": company or "Unknown",
+                    "link": link,
+                    "description": desc,
+                }
+            )
     return result
 
 
-async def _scrape_detail(
-    page, url: str, country: str, city: Optional[str]
+async def _item_to_listing(
+    client: httpx.AsyncClient,
+    item: dict,
+    country: str,
+    city: Optional[str],
+    delay: float,
 ) -> Optional[JobListing]:
-    try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+    job_url = item["link"]
+    description = item["description"]
 
-        title = await _first_text(
-            page,
-            [
-                "h1.jobsearch-JobInfoHeader-title",
-                "h1[data-testid='jobsearch-JobInfoHeader-title']",
-                "h1",
-            ],
-        )
+    await asyncio.sleep(delay)
+    full_desc = await _fetch_full_description(client, job_url)
+    if full_desc and len(full_desc) >= _MIN_DESC_LEN:
+        description = full_desc
 
-        company = await _first_text(
-            page,
-            [
-                "[data-testid='inlineHeader-companyName'] a",
-                "[data-testid='inlineHeader-companyName']",
-                ".icl-u-lg-mr--sm a",
-            ],
-        )
-
-        location_str = await _first_text(
-            page,
-            [
-                "[data-testid='inlineHeader-companyLocation']",
-                ".jobsearch-JobInfoHeader-subtitle div",
-            ],
-        ) or city or country
-
-        salary_raw = await _first_text(
-            page,
-            [
-                "[data-testid='attribute_snippet_testid']",
-                ".salary-snippet-container",
-                ".salaryOnly",
-            ],
-        ) or None
-
-        description = await _first_text(
-            page,
-            ["#jobDescriptionText", ".jobsearch-jobDescriptionText"],
-        )
-
-        if not title or not description or len(description) < _MIN_DESC_LEN:
-            return None
-
-        return JobListing(
-            platform="Indeed",
-            title=title,
-            company=company or "Unknown",
-            location=location_str,
-            country=country,
-            job_url=url,
-            salary_raw=salary_raw,
-            description=description,
-        )
-    except Exception:
-        logger.warning("Indeed detail scrape failed: %s", url)
+    if not description or len(description) < _MIN_DESC_LEN:
         return None
 
+    return JobListing(
+        platform="Indeed",
+        title=item["title"],
+        company=item["company"],
+        location=city or country,
+        country=country,
+        job_url=job_url,
+        description=description,
+    )
 
-async def _first_text(page, selectors: list[str]) -> str:
-    for sel in selectors:
-        try:
-            el = await page.query_selector(sel)
+
+async def _fetch_full_description(client: httpx.AsyncClient, url: str) -> str:
+    """Try to retrieve the full job description page. Returns empty string on failure."""
+    try:
+        r = await client.get(url, timeout=15.0)
+        if r.status_code != 200:
+            return ""
+        soup = BeautifulSoup(r.text, "lxml")
+        for sel in [
+            "#jobDescriptionText",
+            ".jobsearch-jobDescriptionText",
+            "div.job_description",
+        ]:
+            el = soup.select_one(sel)
             if el:
-                text = (await el.inner_text()).strip()
-                if text:
-                    return text
-        except Exception:
-            pass
-    return ""
+                return el.get_text(separator="\n", strip=True)
+        return ""
+    except Exception:
+        return ""
